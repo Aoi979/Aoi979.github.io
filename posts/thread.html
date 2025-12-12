@@ -1,0 +1,732 @@
+<ul>
+<li><a href="#软件线程">软件线程</a><ul>
+<li><a href="#引入">引入</a></li>
+<li><a href="#内核态">内核态</a><ul>
+<li><a href="#内核线程是什么">内核线程是什么？</a></li>
+</ul>
+</li>
+<li><a href="#用户态">用户态</a><ul>
+<li><a href="#pthreads">pthreads</a></li>
+<li><a href="#实现用户态线程">实现用户态线程</a></li>
+<li><a href="#协程">协程</a><ul>
+<li><a href="#c20-coroutine">C++20 Coroutine</a></li>
+<li><a href="#rust-async">Rust Async</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a href="#硬件线程">硬件线程</a><ul>
+<li><a href="#前言">前言</a></li>
+<li><a href="#gpgpu">GPGPU</a></li>
+<li><a href="#simt">SIMT</a></li>
+</ul>
+</li>
+<li><a href="#总结">总结</a></li>
+</ul>
+<p><del>线程（英语：thread）在计算机科学中，是将进程划分为两个或多个线程（实例）或子进程，由单处理器（单线程）或多处理器（多线程）或多核处理系统并发执行。</del>(维基百科)</p>
+<p>省流：线程是<strong>独立的控制流状态</strong></p>
+<h2 id="-">软件线程</h2>
+<h3 id="-">引入</h3>
+<p>现代操作系统需要运行各种各样的程序，为了管理这些程序的运行，操作系统提出了进程的抽象。每个进程都对应于一个运行的程序，有了这种抽象后，程序运行时可以认为自己独占了整个CPU，不需要考虑其他程序的运行状况，而物理资源的分配交给操作系统负责。具体实现上，操作系统通过上下文切换 (保存和恢复进程在运行时的状态)机制实现了进程的暂停、切换和恢复，从而实现了CPU资源的共享，为程序提供了虚拟化的环境。</p>
+<p>随着计算机的发展，CPU的数量不断增加，应用程序的需求也越来越复杂。有些程序希望同时利用多个CPU来加速计算，但传统的进程由于独立的地址空间和较高的通信开销，难以高效实现这种并行。为了解决这个问题，操作系统引入了线程的概念。线程是比进程更轻量级的执行单位，同一进程内的多个线程共享进程的地址空间和大部分资源，使得线程之间的通信和切换开销更低。在多核对称多处理（SMP）架构下，多个线程可以被调度到不同的CPU核心上真正并行运行，从而显著提高程序的性能和资源利用率。通过线程，操作系统不仅提供了更灵活的并发模型，也让应用程序能够更充分地利用现代多核计算机的计算能力。</p>
+<h3 id="-">内核态</h3>
+<h4 id="-">内核线程是什么？</h4>
+<p>Linux内核把进程称为任务(task)，进程的虚拟地址空间分为用户虚拟地址空间和内核虚拟地址空间，所有进程共享内核虚拟地址空间，每个进程有独立的用户虚拟地址空间，这意味着进程其实是用户态的概念，不存在内核进程，内核只有内核线程，且无用户虚拟地址空间，来看看代码</p>
+<pre><code><span class="hljs-keyword">struct</span> task_struct {
+  <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">int</span>            __state;
+  <span class="hljs-keyword">void</span>                *<span class="hljs-built_in">stack</span>;
+  <span class="hljs-keyword">pid_t</span>                pid;
+  <span class="hljs-keyword">pid_t</span>                tgid;
+  <span class="hljs-keyword">struct</span> mm_struct        *mm;
+  <span class="hljs-keyword">struct</span> mm_struct        *active_mm;
+  ......
+}
+</code></pre><p>进程的mm和active_mm指向同一个mm_struct，对于内核线程，mm是nullptr，当内核线程运行时，active_mm指向从进程借来的mm_struct</p>
+<p>在内核中只有task这个概念，只有task才能被调度运行,而用户态是没有权限创建全新的task的，只能通过系统调用去clone当前进程的task，线程只是从进程的task中clone出来的另一个task,所以线程会和进程共享资源,所以进程和线程都是task只是某些属性不同</p>
+<p><del>想创建内核线程的话可以写内核模块，代码运行在内核态</del></p>
+<p>在高级编程语言中全部创建线程的行为都是调用了一个线程库，最终会调用到clone()这种系统调用上，常说的多线程模型指的就是用户态线程库的策略</p>
+<h3 id="-">用户态</h3>
+<h4 id="pthreads">pthreads</h4>
+<p>如果每个人都用clone去编写多线程程序那就太麻烦了，于是有了线程库，线程库为应用提供了创建，退出，合并等操作线程的接口。</p>
+<p>线程库在用户态实现了线程控制块（TCB），这个是作为内核中task的扩展而存在的，编程语言中的threadlocal变量/线程本地存储（TLS）功能就是通过这个实现的，以x86-64为例（Linux平台），当一个线程被调度时，pthread会找到该线程TLS的起始地址，存入段寄存器FS中，当线程访问TLS中的变量时，会用FS中的值加上偏移量的方式获取变量。</p>
+<h4 id="-">实现用户态线程</h4>
+<p>(<em>示例来自cfsamson的200行Rust代码实现绿色线程</em>)</p>
+<p>(<em>不是线程库，不会用clone的，需要一点基础,<del>非常简单</del></em>)</p>
+<p>(<del>ABI相关的东西就不展开说了</del>)</p>
+<pre><code><span class="hljs-meta">#![feature(naked_functions)]</span>
+
+<span class="hljs-keyword">use</span> std::arch::{global_asm, naked_asm};
+<span class="hljs-keyword">use</span> std::sync::atomic::{AtomicUsize, Ordering};
+
+<span class="hljs-comment">/// Default stack size for green thread</span>
+<span class="hljs-keyword">const</span> DEFAULT_STACK_SIZE: <span class="hljs-keyword">usize</span> = <span class="hljs-number">1024</span> * <span class="hljs-number">1024</span> * <span class="hljs-number">2</span>;
+<span class="hljs-comment">/// Max threads for user tasks running</span>
+<span class="hljs-keyword">const</span> MAX_THREADS: <span class="hljs-keyword">usize</span> = <span class="hljs-number">4</span>;
+
+<span class="hljs-comment">/// Pointer to our runtime, we're only setting this variable on initialization</span>
+<span class="hljs-keyword">static</span> <span class="hljs-keyword">mut</span> RUNTIME: <span class="hljs-keyword">usize</span> = <span class="hljs-number">0</span>;
+
+<span class="hljs-comment">/// Runtime schedule and switch threads</span>
+<span class="hljs-keyword">pub</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">Runtime</span></span> {
+    threads: <span class="hljs-built_in">Vec</span>&lt;Thread&gt;,
+    <span class="hljs-comment">// the id of the currently running thread</span>
+    current: <span class="hljs-keyword">usize</span>,
+}
+
+<span class="hljs-comment">/// Green thread</span>
+<span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">Thread</span></span> {
+    id: <span class="hljs-keyword">usize</span>,
+    stack: <span class="hljs-built_in">Vec</span>&lt;<span class="hljs-keyword">u8</span>&gt;,
+    ctx: ThreadContext,
+    state: State,
+}
+
+<span class="hljs-comment">/// Thread state</span>
+<span class="hljs-meta">#[derive(PartialEq, Eq, Debug)]</span>
+<span class="hljs-class"><span class="hljs-keyword">enum</span> <span class="hljs-title">State</span></span> {
+    <span class="hljs-comment">// ready to be assigned a task if needed</span>
+    Available,
+    <span class="hljs-comment">// running</span>
+    Running,
+    <span class="hljs-comment">// ready to move forward and resume execution</span>
+    Ready,
+}
+
+<span class="hljs-meta">#[derive(Debug, Default)]</span>
+<span class="hljs-meta">#[repr(C)]</span>
+<span class="hljs-keyword">pub</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">ThreadContext</span></span> {
+    <span class="hljs-comment">// return address</span>
+    ra: <span class="hljs-keyword">u64</span>,
+    <span class="hljs-comment">// stack pointer</span>
+    sp: <span class="hljs-keyword">u64</span>,
+    <span class="hljs-comment">// s0 - s11 (callee saved registers)</span>
+    s0: <span class="hljs-keyword">u64</span>,
+    s1: <span class="hljs-keyword">u64</span>,
+    s2: <span class="hljs-keyword">u64</span>,
+    s3: <span class="hljs-keyword">u64</span>,
+    s4: <span class="hljs-keyword">u64</span>,
+    s5: <span class="hljs-keyword">u64</span>,
+    s6: <span class="hljs-keyword">u64</span>,
+    s7: <span class="hljs-keyword">u64</span>,
+    s8: <span class="hljs-keyword">u64</span>,
+    s9: <span class="hljs-keyword">u64</span>,
+    s10: <span class="hljs-keyword">u64</span>,
+    s11: <span class="hljs-keyword">u64</span>,
+    <span class="hljs-comment">// task entry</span>
+    entry: <span class="hljs-keyword">u64</span>,
+}
+
+<span class="hljs-keyword">impl</span> Thread {
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">new</span></span>(id: <span class="hljs-keyword">usize</span>) -&gt; <span class="hljs-keyword">Self</span> {
+        Thread {
+            id,
+            stack: <span class="hljs-built_in">vec!</span>[<span class="hljs-number">0_u8</span>; DEFAULT_STACK_SIZE],
+            ctx: ThreadContext::<span class="hljs-keyword">default</span>(),
+            state: State::Available,
+        }
+    }
+
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">new_with_state</span></span>(id: <span class="hljs-keyword">usize</span>, state: State) -&gt; <span class="hljs-keyword">Self</span> {
+        Thread {
+            id,
+            stack: <span class="hljs-built_in">vec!</span>[<span class="hljs-number">0_u8</span>; DEFAULT_STACK_SIZE],
+            ctx: ThreadContext::<span class="hljs-keyword">default</span>(),
+            state,
+        }
+    }
+}
+
+<span class="hljs-keyword">impl</span> Runtime {
+    <span class="hljs-keyword">pub</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">new</span></span>() -&gt; <span class="hljs-keyword">Self</span> {
+        <span class="hljs-comment">// Base thread is for runtime running</span>
+        <span class="hljs-keyword">let</span> base_thread_id = <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">let</span> base_thread = Thread::new_with_state(base_thread_id, State::Running);
+
+        <span class="hljs-comment">// These threads are for user tasks running</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> threads = <span class="hljs-built_in">vec!</span>[base_thread];
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> available_threads = (<span class="hljs-number">1</span>..MAX_THREADS + <span class="hljs-number">1</span>).map(|i| Thread::new(i)).collect();
+        threads.append(&amp;<span class="hljs-keyword">mut</span> available_threads);
+
+        Runtime {
+            threads,
+            current: base_thread_id,
+        }
+    }
+
+    <span class="hljs-comment">/// This is cheating a bit, but we need a pointer to our Runtime</span>
+    <span class="hljs-comment">/// stored so we can call yield on it even if we don't have a</span>
+    <span class="hljs-comment">/// reference to it.</span>
+    <span class="hljs-keyword">pub</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">init</span></span>(&amp;<span class="hljs-keyword">self</span>) {
+        <span class="hljs-keyword">unsafe</span> {
+            <span class="hljs-keyword">let</span> r_ptr: *<span class="hljs-keyword">const</span> Runtime = <span class="hljs-keyword">self</span>;
+            RUNTIME = r_ptr <span class="hljs-keyword">as</span> <span class="hljs-keyword">usize</span>;
+        }
+    }
+
+    <span class="hljs-comment">/// Start running our `Runtime`. It will continually call `t_yield()` until</span>
+    <span class="hljs-comment">/// it returns false which means that there is no more work to do.</span>
+    <span class="hljs-keyword">pub</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">run</span></span>(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>) {
+        <span class="hljs-keyword">while</span> <span class="hljs-keyword">self</span>.t_yield() {}
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"All tasks finished!"</span>);
+    }
+
+    <span class="hljs-comment">/// User tasks call this function to return and schedule a new thread to be run</span>
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">t_return</span></span>(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>) {
+        <span class="hljs-comment">// Mark current thread available, so it can be assigned a new task</span>
+        <span class="hljs-keyword">self</span>.threads[<span class="hljs-keyword">self</span>.current].state = State::Available;
+
+        <span class="hljs-keyword">self</span>.t_schedule();
+    }
+
+    <span class="hljs-comment">/// Suspend current thread and schedule a new thread to be run</span>
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">t_yield</span></span>(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>) -&gt; <span class="hljs-keyword">bool</span> {
+        <span class="hljs-comment">// Mark current thread ready, so it can be scheduled again</span>
+        <span class="hljs-keyword">self</span>.threads[<span class="hljs-keyword">self</span>.current].state = State::Ready;
+
+        <span class="hljs-keyword">self</span>.t_schedule()
+    }
+
+    <span class="hljs-comment">/// Schedule a new thread to be run</span>
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">t_schedule</span></span>(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>) -&gt; <span class="hljs-keyword">bool</span> {
+        <span class="hljs-keyword">let</span> thread_count = <span class="hljs-keyword">self</span>.threads.len();
+
+        <span class="hljs-comment">// Find next ready thread</span>
+        <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> pos = (<span class="hljs-keyword">self</span>.current + <span class="hljs-number">1</span>) % thread_count;
+        <span class="hljs-keyword">while</span> <span class="hljs-keyword">self</span>.threads[pos].state != State::Ready {
+            pos = (pos + <span class="hljs-number">1</span>) % thread_count;
+
+            <span class="hljs-comment">// If no other ready thread, means all user tasks finished</span>
+            <span class="hljs-comment">// so current thread must be base thread</span>
+            <span class="hljs-keyword">if</span> pos == <span class="hljs-keyword">self</span>.current {
+                <span class="hljs-keyword">return</span> <span class="hljs-literal">false</span>;
+            }
+        }
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"RUNTIME: schedule next thread {} to be run"</span>, pos);
+
+        <span class="hljs-comment">// Switch to a new thread</span>
+        <span class="hljs-keyword">self</span>.threads[pos].state = State::Running;
+        <span class="hljs-keyword">let</span> old_pos = <span class="hljs-keyword">self</span>.current;
+        <span class="hljs-keyword">self</span>.current = pos;
+        <span class="hljs-keyword">unsafe</span> {
+            switch(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>.threads[old_pos].ctx, &amp;<span class="hljs-keyword">self</span>.threads[pos].ctx);
+        }
+
+        <span class="hljs-literal">true</span>
+    }
+
+    <span class="hljs-comment">/// Spawn a new task to be executed by a green thread in runtime</span>
+    <span class="hljs-keyword">pub</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">spawn</span></span>(&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>, f: <span class="hljs-function"><span class="hljs-keyword">fn</span></span>()) {
+        <span class="hljs-keyword">let</span> available = <span class="hljs-keyword">self</span>
+            .threads
+            .iter_mut()
+            .find(|t| t.state == State::Available)
+            .expect(<span class="hljs-string">"no available green thread."</span>);
+
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"RUNTIME: spawning task on green thread {}"</span>, available.id);
+        <span class="hljs-keyword">let</span> size = available.stack.len();
+        <span class="hljs-keyword">unsafe</span> {
+            <span class="hljs-keyword">let</span> s_ptr = available.stack.as_mut_ptr().offset(size <span class="hljs-keyword">as</span> <span class="hljs-keyword">isize</span>);
+
+            <span class="hljs-comment">// make sure our stack itself is 8 byte aligned,</span>
+            <span class="hljs-comment">// risc-v ld/sd instructions need address 8 byte alignment</span>
+            <span class="hljs-keyword">let</span> s_ptr = (s_ptr <span class="hljs-keyword">as</span> <span class="hljs-keyword">usize</span> &amp; !<span class="hljs-number">7</span>) <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> <span class="hljs-keyword">u8</span>;
+
+            available.ctx.ra = task_return <span class="hljs-keyword">as</span> <span class="hljs-keyword">u64</span>; <span class="hljs-comment">// task return address</span>
+            available.ctx.sp = s_ptr <span class="hljs-keyword">as</span> <span class="hljs-keyword">u64</span>; <span class="hljs-comment">// stack pointer</span>
+            available.ctx.entry = f <span class="hljs-keyword">as</span> <span class="hljs-keyword">u64</span>; <span class="hljs-comment">// task entry address</span>
+        }
+        available.state = State::Ready;
+    }
+}
+
+<span class="hljs-comment">/// When user task completed, then will jump to this function to return</span>
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">task_return</span></span>() {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">let</span> rt_ptr = RUNTIME <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> Runtime;
+        (*rt_ptr).t_return();
+    }
+}
+
+<span class="hljs-comment">/// Call yield from an arbitrary place in user task code</span>
+<span class="hljs-keyword">pub</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">r</span>#<span class="hljs-title">yield</span></span>() {
+    <span class="hljs-keyword">unsafe</span> {
+        <span class="hljs-keyword">let</span> rt_ptr = RUNTIME <span class="hljs-keyword">as</span> *<span class="hljs-keyword">mut</span> Runtime;
+        (*rt_ptr).t_yield();
+    };
+}
+
+<span class="hljs-comment">/// We could use naked function to implement switch function</span>
+<span class="hljs-meta">#[naked]</span>
+<span class="hljs-meta">#[no_mangle]</span>
+<span class="hljs-keyword">unsafe</span> <span class="hljs-keyword">extern</span> <span class="hljs-string">"C"</span> <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">switch</span></span>(old: *<span class="hljs-keyword">mut</span> ThreadContext, new: *<span class="hljs-keyword">const</span> ThreadContext) {
+    <span class="hljs-comment">// a0: old, a1: new</span>
+    naked_asm!(
+        <span class="hljs-string">"
+        sd ra, 0*8(a0)
+        sd sp, 1*8(a0)
+        sd s0, 2*8(a0)
+        sd s1, 3*8(a0)
+        sd s2, 4*8(a0)
+        sd s3, 5*8(a0)
+        sd s4, 6*8(a0)
+        sd s5, 7*8(a0)
+        sd s6, 8*8(a0)
+        sd s7, 9*8(a0)
+        sd s8, 10*8(a0)
+        sd s9, 11*8(a0)
+        sd s10, 12*8(a0)
+        sd s11, 13*8(a0)
+        // When user task scheduled for the second time,
+        // overwrite task entry address with the return address
+        sd ra, 14*8(a0)
+
+        ld ra, 0*8(a1)
+        ld sp, 1*8(a1)
+        ld s0, 2*8(a1)
+        ld s1, 3*8(a1)
+        ld s2, 4*8(a1)
+        ld s3, 5*8(a1)
+        ld s4, 6*8(a1)
+        ld s5, 7*8(a1)
+        ld s6, 8*8(a1)
+        ld s7, 9*8(a1)
+        ld s8, 10*8(a1)
+        ld s9, 11*8(a1)
+        ld s10, 12*8(a1)
+        ld s11, 13*8(a1)
+        // When user task scheduled for the first time, t0 will be task entry address.
+        // After that, t0 will be return address
+        ld t0, 14*8(a1)
+
+        // pseudo instruction, actually is jalr x0, 0(t0)
+        jr t0
+    "</span>
+    );
+}
+
+
+<span class="hljs-keyword">static</span> FINISHED_TASK_COUNT: AtomicUsize = AtomicUsize::new(<span class="hljs-number">0</span>);
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">main</span></span>() {
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> runtime = Runtime::new();
+    runtime.init();
+    runtime.spawn(|| {
+        test_task(<span class="hljs-number">1</span>);
+    });
+    runtime.spawn(|| {
+        test_task(<span class="hljs-number">2</span>);
+    });
+    runtime.spawn(|| {
+        test_task(<span class="hljs-number">3</span>);
+    });
+    runtime.run();
+    <span class="hljs-built_in">assert_eq!</span>(FINISHED_TASK_COUNT.load(Ordering::SeqCst), <span class="hljs-number">3</span>);
+}
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">test_task</span></span>(task_id: <span class="hljs-keyword">usize</span>) {
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"TASK {} STARTING"</span>, task_id);
+    <span class="hljs-keyword">for</span> i <span class="hljs-keyword">in</span> <span class="hljs-number">0</span>..<span class="hljs-number">4</span> * task_id {
+        <span class="hljs-built_in">println!</span>(<span class="hljs-string">"task: {} counter: {}"</span>, task_id, i);
+        r#<span class="hljs-keyword">yield</span>();
+    }
+    FINISHED_TASK_COUNT.fetch_add(<span class="hljs-number">1</span>, Ordering::SeqCst);
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"TASK {} FINISHED"</span>, task_id);
+}
+</code></pre><p>值得注意的点在于switch的逻辑以及spawn时线程的上下文的ra被设置为函数task_return的地址，当线程被调度时，上下文存储的ra会被恢复到寄存器上，线程的结束必然回到调度逻辑上且因为状态改变这个线程不会再被调度，这个线程始终走不到switch后返回true的逻辑</p>
+<p>(<del>看不懂的话需要熟悉下基础的汇编,示例为RISC-V</del>)</p>
+<h4 id="-">协程</h4>
+<p>在我看来，只要是描述<code>task</code>的就都是标题所指的<code>线程</code>，自然也要讨论讨论<code>协程</code>了</p>
+<p>实际上刚才实现的用户态线程就是有栈协程，他有整个调用栈。而无栈协程只是个根据状态选择不同分支的函数，没有调用栈，常说的无栈协程高性能就来自不需要调用栈节省内存以及协程上下文极小切换没什么开销(就是个状态而已)</p>
+<p>(<em>由于本人掌握的编程语言较少，只能讨论cpp和rust的无栈协程了</em>)</p>
+<p>换句话说，协程只是可以挂起和恢复的函数</p>
+<p>函数只有2个行为：调用和返回，函数返回后，栈上所拥有的状态会被全部销毁，协程则可以挂起，协程挂起时可以保留协程上下文，恢复则恢复协程的上下文，协程的上下文取决于协程内的局部变量等，当协程像函数一样返回，协程也要被销毁</p>
+<h5 id="c-20-coroutine">C++20 Coroutine</h5>
+<p>c++的协程展开后和以下代码的逻辑类似</p>
+<p>（这是伪代码，实际ABI各厂商可以自由实现）</p>
+<pre><code><span class="hljs-keyword">enum</span> State {
+    Start,
+    YieldValue,
+    FinalSuspend,
+    Done
+};
+
+struct CoroutineStateMachine {
+    State current_state = Start; 
+    <span class="hljs-keyword">int</span> a = <span class="hljs-number">1</span>, b = <span class="hljs-number">1</span>;          <span class="hljs-comment">//  </span>
+
+    <span class="hljs-comment">// promise_type的引用，协程的promise接口</span>
+    promise_type&amp; promise;
+
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">resume</span><span class="hljs-params">()</span> </span>{
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-keyword">switch</span> (current_state) {
+                <span class="hljs-keyword">case</span> Start:
+                    // 执行 initial_suspend
+                    <span class="hljs-keyword">if</span> (promise.initial_suspend()) {
+                        current_state = YieldValue;
+                        <span class="hljs-keyword">return</span>;  <span class="hljs-comment">// 挂起</span>
+                    }
+                    <span class="hljs-comment">// 进入协程主体</span>
+                    [[fallthrough]];
+
+                <span class="hljs-keyword">case</span> YieldValue:
+                    <span class="hljs-keyword">while</span> (a &lt; 1000000) {
+                        <span class="hljs-comment">// co_yield a</span>
+                        promise.yield_value(a);
+                        current_state = YieldValue;
+                        std::tie(a, b) = std::make_tuple(b, a + b);
+                        <span class="hljs-keyword">return</span>;  <span class="hljs-comment">// 挂起</span>
+                    }
+                    <span class="hljs-comment">// co_return</span>
+                    promise.return_void();
+                    current_state = FinalSuspend;
+                    [[fallthrough]];
+
+                <span class="hljs-keyword">case</span> FinalSuspend:
+                    // 执行 final_suspend
+                    <span class="hljs-keyword">if</span> (promise.final_suspend()) {
+                        current_state = Done;
+                        <span class="hljs-keyword">return</span>;  <span class="hljs-comment">// 挂起</span>
+                    }
+                    <span class="hljs-comment">// 结束</span>
+                    [[fallthrough]];
+
+                <span class="hljs-keyword">case</span> Done:
+                    <span class="hljs-keyword">return</span>;  <span class="hljs-comment">// 协程结束</span>
+            }
+        } <span class="hljs-keyword">catch</span> (...) {
+            <span class="hljs-comment">// 异常处理</span>
+            <span class="hljs-keyword">if</span> (!promise.initial_await_resume_called()) {
+                promise.unhandled_exception();
+            }
+        }
+    }
+};
+</code></pre><p>先来认识一下协程帧，
+<img src="res/cppcoro.png" alt="协程帧">
+创建协程就是创建协程帧，其中promise类型需要用户定义，其他的编译器会帮你做好，一般来说，整个协程会放在堆内存上</p>
+<p>协程的调用者会得到来自promise_type结构体内get_return_object方法返回的对象，这里一般通过form_promise构造协程句柄coroutine_handle<promise_type>，调用者可以通过协程句柄resume协程和destroy协程</p>
+<p>得到协程的句柄后，它可以被传递到其他地方，例如产生一个普通的函数调用，并传递给它进行后续协程的恢复操作</p>
+<p>在协程的恢复过程中，恢复者调用协程句柄的resume()函数，如上面代码所示，它就是一个普通的函数调用，会将控制流会转交给协程。</p>
+<p>在协程内部，它可以选择挂起或返回动作，通过C++20引入三个新的关键字实现：co_await、co_yield和co_return。只要函数存在这三个中的任意一个关键字，它便被当成协程处理。</p>
+<p>说这些肯定还是一头雾水(<del>其实也没打算教会谁就是了</del>)，理解协程需要理解Promise和Awaitable,这两个都是用户自定义的类型.</p>
+<p>Promise类型能够让用户定制一个协程的调用、返回行为，以及协程体内的co_await与co_yield表达式的行为。</p>
+<p>Awaitable类型能够让用户定制co_await表达式的语义，co_await接受一个Awaitable对象，该对象能够控制当前协程是否挂起，挂起后需要执行哪些逻辑供将来恢复，以及恢复后如何产生该表达式的值</p>
+<p>由浅入深，先从创建协程帧开始</p>
+<pre><code><span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;coroutine&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;iostream&gt;</span></span>
+
+<span class="hljs-keyword">struct</span> MyPromise {
+    <span class="hljs-built_in">std</span>::<span class="hljs-function">suspend_always <span class="hljs-title">initial_suspend</span><span class="hljs-params">()</span> </span>{ <span class="hljs-keyword">return</span> {}; }
+    <span class="hljs-built_in">std</span>::<span class="hljs-function">suspend_never <span class="hljs-title">final_suspend</span><span class="hljs-params">()</span> <span class="hljs-keyword">noexcept</span> </span>{ <span class="hljs-keyword">return</span> {}; }
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">return_void</span><span class="hljs-params">()</span> </span>{}
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">unhandled_exception</span><span class="hljs-params">()</span> </span>{ <span class="hljs-built_in">std</span>::terminate(); }
+
+    <span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt; get_return_object() {
+        <span class="hljs-keyword">return</span> <span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt;::from_promise(*<span class="hljs-keyword">this</span>);
+    }
+};
+
+<span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt; myCoroutine() {
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine started\n"</span>;
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine ended\n"</span>;
+    co_return;
+}
+
+<span class="hljs-function"><span class="hljs-keyword">int</span> <span class="hljs-title">main</span><span class="hljs-params">()</span> </span>{
+    <span class="hljs-keyword">auto</span> handle = myCoroutine();
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine created, not started yet\n"</span>;
+    handle.resume();
+    handle.destroy();
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}
+</code></pre><p>协程帧里是需要promise类型的，通过将promise类型传递给句柄类型以让编译器生成正确的协程帧，<code>initial_suspend</code>的返回类型为std::suspend_always表示协程创建完立马挂起，所以我们需要使用句柄手动resume才能将控制流转交给协程，resume会根据当前状态选择正确的分支路径，可以参考最开始给出的伪代码，最后会执行到co_return，这标志着协程已经执行完了，如伪代码所示，他会调用promise定义的相关行为，最后改变状态表示协程已经进入结束状态，最后调用<code>final_suspend</code>决定还要不要挂起协程</p>
+<p>而控制协程挂起的就是awaiter，为了体现awaiter的作用，代码扩展为</p>
+<pre><code><span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;coroutine&gt;</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">include</span> <span class="hljs-meta-string">&lt;iostream&gt;</span></span>
+
+<span class="hljs-keyword">struct</span> MyAwaiter {
+    <span class="hljs-function"><span class="hljs-keyword">bool</span> <span class="hljs-title">await_ready</span><span class="hljs-params">()</span> <span class="hljs-keyword">const</span> <span class="hljs-keyword">noexcept</span> </span>{ <span class="hljs-keyword">return</span> <span class="hljs-literal">false</span>; }
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">await_suspend</span><span class="hljs-params">(<span class="hljs-built_in">std</span>::coroutine_handle&lt;&gt; h)</span> <span class="hljs-keyword">const</span> <span class="hljs-keyword">noexcept</span> </span>{
+        <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine suspended!\n"</span>;
+    }
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">await_resume</span><span class="hljs-params">()</span> <span class="hljs-keyword">const</span> <span class="hljs-keyword">noexcept</span> </span>{
+        <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine resumed!\n"</span>;
+    }
+};
+
+<span class="hljs-keyword">struct</span> MyPromise {
+    <span class="hljs-built_in">std</span>::<span class="hljs-function">suspend_always <span class="hljs-title">initial_suspend</span><span class="hljs-params">()</span> </span>{ <span class="hljs-keyword">return</span> {}; }
+    <span class="hljs-built_in">std</span>::<span class="hljs-function">suspend_never <span class="hljs-title">final_suspend</span><span class="hljs-params">()</span> <span class="hljs-keyword">noexcept</span> </span>{ <span class="hljs-keyword">return</span> {}; }
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">return_void</span><span class="hljs-params">()</span> </span>{}
+    <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">unhandled_exception</span><span class="hljs-params">()</span> </span>{ <span class="hljs-built_in">std</span>::terminate(); }
+
+    <span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt; get_return_object() {
+        <span class="hljs-keyword">return</span> <span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt;::from_promise(*<span class="hljs-keyword">this</span>);
+    }
+};
+
+<span class="hljs-built_in">std</span>::coroutine_handle&lt;MyPromise&gt; myCoroutine() {
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine started\n"</span>;
+    co_await MyAwaiter{};
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine ended\n"</span>;
+    co_return;
+}
+
+<span class="hljs-function"><span class="hljs-keyword">int</span> <span class="hljs-title">main</span><span class="hljs-params">()</span> </span>{
+    <span class="hljs-keyword">auto</span> handle = myCoroutine();
+    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">cout</span> &lt;&lt; <span class="hljs-string">"Coroutine created, not started yet\n"</span>;
+    handle.resume();
+    handle.resume();
+    handle.destroy();
+}
+</code></pre><p>co_await需要接一个awaiter对象，其实不是awaiter也行，因为会自动转换，编译器会检查携程用户定义的promise对象是否存在await_transform,如果存在，那么awaiter对象就是await_transform返回的那个，通过这一步得到awaiter/awaitable后，检查该对象是否重载了operator co_await()操作符，如果重载则使用该函数调用后的结果作为最终的Awaiter对象</p>
+<p>awaiter需要实现三个接口</p>
+<ul>
+<li>await_ready,判断当前携程是否需要在此挂起</li>
+<li>await_suspend， 接受当前协程的句柄，用户爱用这个句柄干嘛都行</li>
+<li>await_resume，当前协程恢复时，其返回值将作为整个co_await表达式的值</li>
+</ul>
+<p>其中await_suspend有3个版本，通过返回类型区分</p>
+<ul>
+<li>返回类型为void，则直接返回给当前协程的调用者或恢复者。</li>
+<li>返回类型为bool，如果返回true，则挂起当前协程并返回给当前协程的调用者或恢复者，否则直接恢复当前协程</li>
+<li>返回类型为coroutine_handle，则挂起当前协程并返回给当前协程的调用者或恢复者，随即恢复它所返回的协程句柄,也就是挂起当前resume另一个（<em>印象中rust是做不到这种操作的</em>）</li>
+</ul>
+<p>编译器会将<code>auto result = co_await awaiter;</code>展开为类似</p>
+<pre><code><span class="hljs-keyword">if</span> (!awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>ready()) {
+    awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>suspend(coroutine<span class="hljs-number">_</span>handle);
+    <span class="hljs-keyword">return</span>; <span class="hljs-comment">// 协程挂起</span>
+}
+auto result = awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>resume();
+</code></pre><p>的片段，这保证了resume回来后总能执行到awaiter的await_resume</p>
+<p>而co_yield则是</p>
+<pre><code>auto awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span> = promise.yield<span class="hljs-number">_</span><span class="hljs-keyword">value</span>(expr);   <span class="hljs-comment">// yield_value 返回 awaiter</span>
+<span class="hljs-keyword">if</span> (!awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>ready()) {
+    awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>suspend(coroutine<span class="hljs-number">_</span>handle);
+    <span class="hljs-keyword">return</span>; <span class="hljs-comment">// 协程挂起</span>
+}
+auto result = awaiter<span class="hljs-number">_</span><span class="hljs-keyword">object</span>.await<span class="hljs-number">_</span>resume();
+</code></pre><p>再次调用到了promise，可以将co_yield后接的值传递给promise，co_return也是类似的，就不再列举出来了</p>
+<p>实际上std::suspend_never和std::suspend_always也都是awaiter</p>
+<p>总之，在协程里写的各种局部变量会被放在堆上，而协程想要将结果返回给调用者也都走promise，将结果写进promise的某个字段，调用者拥有句柄，句柄可访问promise，各种各样的挂起逻辑靠co_await和awaiter</p>
+<h5 id="rust-async">Rust Async</h5>
+<p>(<del>不会rust,瞎说的，有错误请纠正</del>)
+rust的协程设计上和cpp完全不同，个人理解是c++只需要理解编译器怎么生成协程就好了，爱怎么用怎么用，拿到句柄玩一堆UB都行，rust却完整规定了一种编程模式</p>
+<p>(<del>rust本来就没称呼这个为协程</del>)</p>
+<p>除了手动实现future trait(<em>嵌套的future最终总会poll一个手动实现的future</em>), rust中每一个async函数都会自动生成并返回一个future对象，通过future trait可以看到是通过poll来执行协程内代码以及状态切换，这里贴一下tokio教学文档里的例子</p>
+<pre><code><span class="hljs-keyword">impl</span> Future <span class="hljs-keyword">for</span> MainFuture {
+    <span class="hljs-class"><span class="hljs-keyword">type</span> <span class="hljs-title">Output</span></span> = ();
+
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">poll</span></span>(<span class="hljs-keyword">mut</span> <span class="hljs-keyword">self</span>: Pin&lt;&amp;<span class="hljs-keyword">mut</span> <span class="hljs-keyword">Self</span>&gt;, cx: &amp;<span class="hljs-keyword">mut</span> Context&lt;<span class="hljs-symbol">'_</span>&gt;)
+        -&gt; Poll&lt;()&gt;
+    {
+        <span class="hljs-keyword">use</span> MainFuture::*;
+
+        <span class="hljs-keyword">loop</span> {
+            <span class="hljs-keyword">match</span> *<span class="hljs-keyword">self</span> {
+                State0 =&gt; {
+                    <span class="hljs-keyword">let</span> when = Instant::now() +
+                        Duration::from_millis(<span class="hljs-number">10</span>);
+                    <span class="hljs-keyword">let</span> future = Delay { when };
+                    *<span class="hljs-keyword">self</span> = State1(future);
+                }
+                State1(<span class="hljs-keyword">ref</span> <span class="hljs-keyword">mut</span> my_future) =&gt; {
+                    <span class="hljs-keyword">match</span> Pin::new(my_future).poll(cx) {
+                        Poll::Ready(out) =&gt; {
+                            <span class="hljs-built_in">assert_eq!</span>(out, <span class="hljs-string">"done"</span>);
+                            *<span class="hljs-keyword">self</span> = Terminated;
+                            <span class="hljs-keyword">return</span> Poll::Ready(());
+                        }
+                        Poll::Pending =&gt; {
+                            <span class="hljs-keyword">return</span> Poll::Pending;
+                        }
+                    }
+                }
+                Terminated =&gt; {
+                    <span class="hljs-built_in">panic!</span>(<span class="hljs-string">"future polled after completion"</span>)
+                }
+            }
+        }
+    }
+}
+</code></pre><p>通过executor去poll这些future,executor需要为这些future提供waker,并用waker构造context,这样在pending时就可以通过传入的context拿到waker,并用waker将自己重新加入调度队列中</p>
+<pre><code><span class="hljs-keyword">use</span> std::future::Future;
+<span class="hljs-keyword">use</span> std::pin::Pin;
+<span class="hljs-keyword">use</span> std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">dummy_raw_waker</span></span>() -&gt; RawWaker {
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">clone</span></span>(_: *<span class="hljs-keyword">const</span> ()) -&gt; RawWaker { dummy_raw_waker() }
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">wake</span></span>(_: *<span class="hljs-keyword">const</span> ()) {}
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">wake_by_ref</span></span>(_: *<span class="hljs-keyword">const</span> ()) {}
+    <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">drop</span></span>(_: *<span class="hljs-keyword">const</span> ()) {}
+
+    RawWaker::new(std::ptr::null(), &amp;RawWakerVTable::new(
+        clone,
+        wake,
+        wake_by_ref,
+        <span class="hljs-built_in">drop</span>,
+    ))
+}
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">dummy_waker</span></span>() -&gt; Waker {
+    <span class="hljs-keyword">unsafe</span> { Waker::from_raw(dummy_raw_waker()) }
+}
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">block_on</span></span>&lt;F: Future&gt;(<span class="hljs-keyword">mut</span> fut: F) -&gt; F::Output {
+    <span class="hljs-keyword">let</span> waker = dummy_waker();
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> cx = Context::from_waker(&amp;waker);
+    <span class="hljs-keyword">let</span> <span class="hljs-keyword">mut</span> fut = <span class="hljs-keyword">unsafe</span> { Pin::new_unchecked(&amp;<span class="hljs-keyword">mut</span> fut) };
+
+    <span class="hljs-keyword">loop</span> {
+        <span class="hljs-keyword">match</span> fut.as_mut().poll(&amp;<span class="hljs-keyword">mut</span> cx) {
+            Poll::Ready(val) =&gt; <span class="hljs-keyword">return</span> val,
+            Poll::Pending =&gt; {
+                <span class="hljs-comment">// 在真正的 executor 中，这里会等待事件</span>
+                <span class="hljs-comment">// 我们的 dummy executor 不会等待，所以继续 poll</span>
+            }
+        }
+    }
+}
+
+
+async <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">hello</span></span>() -&gt; <span class="hljs-keyword">i32</span> {
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Hello inside coroutine!"</span>);
+    <span class="hljs-number">42</span>
+}
+
+<span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">main</span></span>() {
+    <span class="hljs-keyword">let</span> result = block_on(hello());
+    <span class="hljs-built_in">println!</span>(<span class="hljs-string">"Result = {}"</span>, result);
+}
+</code></pre><p>block_on就是承担的executor的责任，真正的异步运行时的话会有自己的任务队列，会不断消费队列中的任务</p>
+<pre><code>async <span class="hljs-function"><span class="hljs-keyword">fn</span> <span class="hljs-title">foo</span></span>() -&gt; <span class="hljs-keyword">i32</span> {
+    <span class="hljs-keyword">let</span> x = future.await;
+    x + <span class="hljs-number">1</span>
+}
+</code></pre><p>rust中.await会变成对其future的poll，如以下伪代码</p>
+<pre><code><span class="hljs-keyword">loop</span> {
+    <span class="hljs-keyword">match</span> Pin::new(&amp;<span class="hljs-keyword">mut</span> future).poll(cx) {
+        Poll::Ready(v) =&gt; {
+            x = v;
+            <span class="hljs-keyword">break</span>;
+        }
+        Poll::Pending =&gt; {
+            <span class="hljs-keyword">return</span> Poll::Pending;  <span class="hljs-comment">// suspend！</span>
+        }
+    }
+}
+</code></pre><p>其中context来自父层future被executor执行poll时传入的context</p>
+<p>而waker是让任务在异步事件完成后能被执行器重新 poll 的机制</p>
+<pre><code><span class="hljs-keyword">pub</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">RawWaker</span></span> {
+    data: *<span class="hljs-keyword">const</span> (),
+    vtable: &amp;<span class="hljs-symbol">'static</span> RawWakerVTable,
+}
+
+<span class="hljs-keyword">pub</span> <span class="hljs-class"><span class="hljs-keyword">struct</span> <span class="hljs-title">RawWakerVTable</span></span> {
+    clone: <span class="hljs-function"><span class="hljs-keyword">fn</span></span>(*<span class="hljs-keyword">const</span> ()) -&gt; RawWaker,
+    wake: <span class="hljs-function"><span class="hljs-keyword">fn</span></span>(*<span class="hljs-keyword">const</span> ()),
+    wake_by_ref: <span class="hljs-function"><span class="hljs-keyword">fn</span></span>(*<span class="hljs-keyword">const</span> ()),
+    <span class="hljs-built_in">drop</span>: <span class="hljs-function"><span class="hljs-keyword">fn</span></span>(*<span class="hljs-keyword">const</span> ()),
+}
+</code></pre><p>其中data指向执行器内部保存的 “任务结构”，RawWakerVTable规定了如何wake,clone,drop</p>
+<p>最简单的wake就是将任务重新放回任务队列，后续executor在Loop消费任务的时候自然就又poll回来了</p>
+<p>主题也不是异步编程，就不深入说了</p>
+<h2 id="-">硬件线程</h2>
+<p>总算把软件部分水完了，实际上我也早忘了上面那些玩意，重新翻了资料才凑出来的</p>
+<h3 id="-">前言</h3>
+<p>在开始之前需要先了解一下Flynn 分类法，</p>
+<p>根据 <strong>指令流</strong> 和 <strong>数据流</strong> 的数量对计算机体系结构进行分类：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>全称</th>
+<th>含义</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SISD</strong></td>
+<td>Single Instruction, Single Data</td>
+<td>单指令流、单数据流；顺序执行的标量处理器</td>
+<td>传统单核 CPU</td>
+</tr>
+<tr>
+<td><strong>SIMD</strong></td>
+<td>Single Instruction, Multiple Data</td>
+<td>单指令流、多数据流；同一指令并行处理多组数据</td>
+<td>GPU、AVX/NEON 指令集</td>
+</tr>
+<tr>
+<td><strong>MISD</strong></td>
+<td>Multiple Instruction, Single Data</td>
+<td>多指令流、单数据流；理论结构，实际少见</td>
+<td>容错系统（流水线冗余）</td>
+</tr>
+<tr>
+<td><strong>MIMD</strong></td>
+<td>Multiple Instruction, Multiple Data</td>
+<td>多指令流、多数据流；多核或分布式并行系统</td>
+<td>多核 CPU、集群、超级计算机</td>
+</tr>
+</tbody>
+</table>
+<p>硬件多线程就是和MIMD密切相关的概念，MIMD并没规定指令流与处理器功能单元之间的关系，自然可以想到通过共享功能单元来执行不同指令流以有效利用硬件资源，为了支持这种共享，处理器必须复制每个指令流的独立状态。例如，每个指令流都需要独立的程序计数器以及寄存器堆。</p>
+<p>在上面，我们都是通过软件实现的类似功能，硬件多线程就是硬件支持的在线程间快速切换的能力</p>
+<p>额外提一下每个人都在使用的<code>同时多线程</code>，就是超线程技术，使用lscpu可以查看指标<code>Thread(s) per core</code>,大于1就是用了同时多线程</p>
+<p>同时多线程使用多发射，动态调度流水线的处理器资源来挖掘线程级并行和指令级并行，消费级的cpu使用同时多线程只是为了不浪费功能单元，没什么隐藏延迟的能力</p>
+<h3 id="gpgpu">GPGPU</h3>
+<p>众所周知CPU就那点线程数，而GPU却能开出成千上万的线程数,CPU是不是拉完了？实际上二者并不等价</p>
+<p>CPU设计为面向延迟，GPU设计为面向吞吐，在大规模数据并行计算上，GPU有着天然的优势，就好比一辆轿车和一辆公交车，可以想象一下公交站来的是轿车那么运送全部乘客需要花多久，游戏渲染也是大规模数据并行计算，所以打游戏需要好的GPU</p>
+<p>自2006年，NVIDIA公布了统一着色器架构，GPU就进入了通用计算时代，在大规模数据并行处理问题上，GPGPU可以提供CPU无可比拟的速度，由于其通用性，当下火热的AI也适合在GPGPU上计算，更何况各家都在往GPGPU里加入更适合AI计算的功能单元</p>
+<h3 id="simt">SIMT</h3>
+<p>GPGPU本质上也是一种SIMD向量处理器，但NV另外为其定义了新名字：SIMT,由于在具体实现上与先前的SIMD概念并不一致，于是人们接受了这个说法。SIMT一方面十分契合GPU体系结构，另一方面又贴合程序员的思维习惯，这使得SIMT成功推广开，成为GPU上标准的编程模型(前几天NV又公布了Tile IR, 这是异于SIMT的全新编程模型，但主要是服务于张量核心的，与当前讨论的向量无关)</p>
+<p>在原来的SIMD向量处理器中，一条指令可以处理一个向量，但控制逻辑仍然是通过与通用处理器相同的方式来完成的，即借用标量计算来维护循环条件，然后使用条件分支跳转指令来构成分支或循环控制流。在SIMD向量处理器上，一条指令流仍然对应着一条控制流，即使计算过程很明显是并行的，但人们还是会认为整个向量处理器上只运行了一个线程。SIMT不再将指令流视作线程，而是允许处理器中构成向量的每一个单独运算单元都能够执行自己的线程，这是因为在GPU上每个运算单元都允许有自己独立的控制流。在编写SIMT程序时，程序员专注于控制众多运算器中的一个，并如同控制通用处理器一样去编写正常的分支、循环控制结构；GPU上全部运算器都将遵循相同的程序一同执行</p>
+<p>在传统的SIMD中遇到分支一般会执行全部路径，最后靠掩码分发不同路径的结果，但NV却是先关闭不符合当前路径的线程，然后执行这个分支，其他分支同理，在<code>Volta</code>架构引入独立线程程序计数器之前一直是这样的，可以认为GPU的线程数只是SIMD中数据流的宽度，引入之后这个概念就越发模糊了,因为每个线程都有自己的程序计数器等状态，虽然仍然不意味着不同分支能同时运行</p>
+<p>以下是一段SIMT编程模型的代码，风格为 <code>Scalar Program, Blocked Threads</code>，通过threadIdx得知自己是哪一个线程，实现上，保存线程信息的寄存器是特殊寄存器，程序描述的仍然是标量，但会启动成百上千的线程去执行这段代码</p>
+<pre><code>template&lt;<span class="hljs-keyword">int</span> <span class="hljs-keyword">const</span> BLOCKSIZE&gt;
+__<span class="hljs-function">global__ <span class="hljs-keyword">void</span> <span class="hljs-title">sgemm_shared_mem_block</span>(<span class="hljs-params"><span class="hljs-keyword">int</span> M, <span class="hljs-keyword">int</span> N, <span class="hljs-keyword">int</span> K, <span class="hljs-keyword">float</span> alpha,
+                                       <span class="hljs-keyword">float</span> <span class="hljs-keyword">const</span> *A, <span class="hljs-keyword">float</span> <span class="hljs-keyword">const</span> *B,
+                                       <span class="hljs-keyword">float</span> beta, <span class="hljs-keyword">float</span> *C</span>) </span>{
+    <span class="hljs-keyword">uint</span> <span class="hljs-keyword">const</span> cRow = blockIdx.x;
+    <span class="hljs-keyword">uint</span> <span class="hljs-keyword">const</span> cCol = blockIdx.y;
+
+    __shared__ <span class="hljs-keyword">float</span> As[BLOCKSIZE * BLOCKSIZE];
+    __shared__ <span class="hljs-keyword">float</span> Bs[BLOCKSIZE * BLOCKSIZE];
+
+    <span class="hljs-keyword">uint</span> <span class="hljs-keyword">const</span> threadCol = threadIdx.x % BLOCKSIZE;
+    <span class="hljs-keyword">uint</span> <span class="hljs-keyword">const</span> threadRow = threadIdx.x / BLOCKSIZE;
+
+    A += cRow * BLOCKSIZE * K;
+    B += cCol * BLOCKSIZE;
+    C += cRow * BLOCKSIZE * N + cCol * BLOCKSIZE;
+
+    <span class="hljs-keyword">float</span> tmp = <span class="hljs-number">0.0</span>;
+    <span class="hljs-keyword">for</span> (<span class="hljs-keyword">int</span> bkIdx = <span class="hljs-number">0</span>; bkIdx &lt; K; bkIdx += BLOCKSIZE) {
+        As[threadRow * BLOCKSIZE + threadCol] = A[threadRow * K + threadCol];
+        Bs[threadRow * BLOCKSIZE + threadCol] = B[threadRow * N + threadCol];
+
+        __syncthreads();
+        A += BLOCKSIZE;
+        B += BLOCKSIZE * N;
+<span class="hljs-meta">#<span class="hljs-meta-keyword">pragma</span> unroll</span>
+        <span class="hljs-keyword">for</span> (<span class="hljs-keyword">int</span> dotIdx = <span class="hljs-number">0</span>; dotIdx &lt; BLOCKSIZE; ++dotIdx) {
+            tmp += As[threadRow * BLOCKSIZE + dotIdx] *
+                    Bs[dotIdx * BLOCKSIZE + threadCol];
+        }
+        __syncthreads();
+    }
+    C[threadRow * N + threadCol] =
+            alpha * tmp + beta * C[threadRow * N + threadCol];
+}
+</code></pre><p>说一句题外话，如果要快速适应智能计算的需求，最合适的编程模型是按Tile划分数据，编译器自动分配线程，这是因为当下的GPU塞了太多AI计算需要的东西了，而AI需要的计算一般描述数据为张量，同向量处理器和标量处理器的关系，张量不会更通用，但特定任务下会很好用，前几天NV公布了完全不同于SIMT风格虚拟指令集PTX的Tile IR，以下是官方的介绍</p>
+<p>Unlike PTX, which models the GPU as a data-parallel single instruction multiple thread (SIMT) processor, Tile IR models the GPU as a tile-based processor. In Tile IR, each logical thread (tile block) computes over partial fragments (tiles) of multi-dimensional arrays (tensors).</p>
+<p>如果要挖掘理论性能，还是需要PTX的，这是体系结构决定的，如果是为了快速适应智能计算的需要，Tile IR会更好</p>
+<h2 id="-">总结</h2>
+<p>不管软件还是硬件都指明，线程是<em>*独立的控制流状态</em></p>
+<p>(参考了大量资料，如果觉得某段话眼熟，那肯定是我摘抄过来了)</p>
