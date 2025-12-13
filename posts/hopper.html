@@ -19,7 +19,7 @@
 </li>
 </ul>
 </li>
-<li><a href="#hierarchyimage">Hierarchyimage</a><ul>
+<li><a href="#hierarchy">Hierarchy</a><ul>
 <li><a href="#thread-block-clusters">Thread Block Clusters</a></li>
 <li><a href="#dsmem">DSMEM</a></li>
 </ul>
@@ -28,13 +28,14 @@
 <li><a href="#warp-specialization">Warp-Specialization</a></li>
 <li><a href="#perpistent-kernel">Perpistent kernel</a></li>
 <li><a href="#cooperative">cooperative</a></li>
-<li><a href="#ping-pong">ping-pong</a><h2 id="-">前言</h2>
-Hopper开始NV GPU开始DSA化，对于AI算子，不再使用<code>SIMT</code>掩盖延迟，而是靠异步执行打满计算单元，这和npu已经没区别了，英伟达称其为第一代异步GPU，而且NV明确说明后续架构（<em>Blackwell</em>）不会兼任部分Hopper特性</li>
+<li><a href="#ping-pong">ping-pong</a></li>
 </ul>
 </li>
 </ul>
 </li>
 </ul>
+<h2 id="-">前言</h2>
+<p>Hopper开始NV GPU开始DSA化，对于AI算子，不再使用<code>SIMT</code>掩盖延迟，而是靠异步执行打满计算单元，这和npu已经没区别了，英伟达称其为第一代异步GPU，而且NV明确说明后续架构（<em>Blackwell</em>）不会兼任部分Hopper特性</p>
 <p>新的东西还是比较多的，也不是很简单，而信息又较分散，甚至我参考的资料有很多错误！！！所以写这样一篇笔记(<del>也就是写给自己看的</del>)</p>
 <h2 id="-">前置基础</h2>
 <h3 id="proxy">Proxy</h3>
@@ -86,7 +87,7 @@ A proxy fence is required to synchronize memory operations across different prox
 <p>完成机制需要barrier,这会为barrier增加事务计数，数值为传输的数据的大小，具体的说，在调用<code>cp.async.bulk</code>时会设置当数据传输完成时对指定barrier对象的tx计数减操作，大小为传输的数据的字节数，在这条指令后必须手动增加barrier对象的tx计数（使用generic proxy），大小与上面对应，只有当barrier的arrival计数和tx计数都为0时，wait才会结束，另外这里应该是有隐式同步，TMA写smem属于async proxy,在wait后不需要fence就可以使用generic proxy去访问smem，但在写smem后需要手动fence以让TMA可见，才能用TMA完成smem2gmem的操作</p>
 <h4 id="smem2gmem">smem2gmem</h4>
 <p>完成机制为<code>bulk async-group</code>，发出异步拷贝后<code>cp.async.bulk.commit.group</code>和<code>cp.async.bulk.wait.group.read</code>就好了</p>
-<h2 id="hierarchyimage">Hierarchyimage</h2>
+<h2 id="hierarchy">Hierarchy</h2>
 <h3 id="thread-block-clusters">Thread Block Clusters</h3>
 <p>新增的层次结构，为避免余数效应，在kernel启动时可配置最小cluster与预期cluster的大小，故代码不可硬编码</p>
 <p>NV在GPC中实现了SM2SM的互联网络，GPC是硬件层级中的一组SM，它们在物理上总是紧密相邻，同一个GPC中的cta可互相访问各自的smem，这就是分布式smem</p>
