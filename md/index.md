@@ -6,9 +6,6 @@ hero:
   name: Aoikajitsu
   text: Technical Notes
   tagline: HPC / Systems
-  image:
-    src: /res/EV_A0722_1.png
-    alt: Cover image
   actions:
     - theme: brand
       text: Notes
