@@ -1,0 +1,13 @@
+{
+  "name": "aoi979.github.io",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev md --host 0.0.0.0 --port 5173",
+    "docs:build": "vitepress build md",
+    "docs:preview": "vitepress preview md --host 0.0.0.0 --port 4173"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}
