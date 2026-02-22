@@ -7,7 +7,7 @@ hero:
   text: Technical Notes
   tagline: HPC / Systems
   image:
-    src: /res/1000119409.png
+    src: /res/EV_A0722_1.png
     alt: Cover image
   actions:
     - theme: brand
