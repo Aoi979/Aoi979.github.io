@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitepress'
+import mathjax3 from 'markdown-it-mathjax3'
 
 type Note = {
   slug: string
@@ -56,17 +57,17 @@ function listNotes(): Note[] {
 const notes = listNotes()
 
 export default defineConfig({
-  lang: 'zh-CN',
+  lang: 'en-US',
   title: 'Aoikajitsu',
-  description: 'Aoi979 的技术笔记',
+  description: 'Aoi979 technical notes',
   base: resolveBase(),
   cleanUrls: true,
   lastUpdated: true,
   themeConfig: {
-    nav: [{ text: '首页', link: '/' }],
+    nav: [{ text: 'Home', link: '/' }],
     sidebar: [
       {
-        text: '笔记',
+        text: 'Notes',
         items: notes.map((note) => ({
           text: note.title,
           link: `/${note.slug}`
@@ -79,16 +80,19 @@ export default defineConfig({
     },
     outline: {
       level: [2, 3],
-      label: '本页目录'
+      label: 'On this page'
     },
     docFooter: {
-      prev: '上一篇',
-      next: '下一篇'
+      prev: 'Previous page',
+      next: 'Next page'
     },
-    darkModeSwitchLabel: '切换主题',
-    returnToTopLabel: '回到顶部'
+    darkModeSwitchLabel: 'Toggle dark mode',
+    returnToTopLabel: 'Back to top'
   },
   markdown: {
-    lineNumbers: true
+    lineNumbers: true,
+    config(md) {
+      md.use(mathjax3)
+    }
   }
 })

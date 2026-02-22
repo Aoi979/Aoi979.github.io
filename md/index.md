@@ -1,23 +1,24 @@
----
-layout: home
-title: Aoikajitsu
-titleTemplate: false
-hero:
-  name: Aoikajitsu
-  text: 系统 / HPC / AI Operators 学习笔记
-  tagline: 只写 Markdown，推送后自动发布
-  actions:
-    - theme: brand
-      text: 打开第一篇
-      link: /hopper
-    - theme: alt
-      text: GitHub
-      link: https://github.com/Aoi979
-features:
-  - title: 只维护一个目录
-    details: 你只写 md 目录下的 Markdown 文件，不再有中间生成目录。
-  - title: 自动发布
-    details: 推送到 main 分支后，GitHub Actions 自动构建并发布。
-  - title: 资源路径不变
-    details: 图片继续写成 res/xxx.png，不需要记新规则。
----
+# Aoikajitsu
+
+Welcome. This site is mainly for storing notes, technical records,
+and some unstructured thoughts worth preserving.
+
+## About Me
+
+I am currently focused on systems, high-performance computing (HPC),
+and AI operators, studying GPU architectures, CUDA / PTX,
+and some low-level software system design.
+
+This site mainly serves as a collection of learning notes.
+The content may be incomplete or immature, but accuracy is always the priority.
+
+## Links
+
+- GitHub: [https://github.com/Aoi979](https://github.com/Aoi979)
+
+## Articles
+
+- [CuTe Layout笔记](/cute_layout)
+- [NV Hopper 架构笔记](/hopper)
+- [关于线程的碎碎念](/thread)
+- [LevelDB 的笔记](/leveldb)
