@@ -64,7 +64,10 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
   themeConfig: {
-    nav: [{ text: 'Home', link: '/' }],
+    nav: [
+      { text: 'Home', link: '/' },
+      { text: 'Notes', link: '/notes' }
+    ],
     sidebar: [
       {
         text: 'Notes',
