@@ -51,7 +51,17 @@ function listNotes(): Note[] {
         updatedAt: stat.mtimeMs
       }
     })
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .sort((a, b) => {
+      // Keep the notes hub pinned on top, then sort the rest by recency.
+      if (a.slug === 'notes' && b.slug !== 'notes') {
+        return -1
+      }
+      if (b.slug === 'notes' && a.slug !== 'notes') {
+        return 1
+      }
+
+      return b.updatedAt - a.updatedAt
+    })
 }
 
 const notes = listNotes()
@@ -66,7 +76,8 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Home', link: '/' },
-      { text: 'Notes', link: '/notes' }
+      { text: 'Notes', link: '/notes' },
+      { text: 'Drafts', link: 'https://t.me/+LQ1z-puh1exmZjJl' }
     ],
     sidebar: [
       {

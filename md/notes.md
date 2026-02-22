@@ -1,6 +1,7 @@
 # Notes
 
 All notes are listed here. Choose any topic to start reading.
+For short drafts and unfinished ideas: [Drafts Channel](https://t.me/+LQ1z-puh1exmZjJl).
 
 - [CuTe Layout笔记](/cute_layout)
 - [NV Hopper 架构笔记](/hopper)
