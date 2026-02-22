@@ -4,23 +4,23 @@ title: Aoikajitsu
 titleTemplate: false
 hero:
   name: Aoikajitsu
-  text: Welcome. This site is mainly for storing notes, technical records, and some unstructured thoughts worth preserving.
-  tagline: I am currently focused on systems, high-performance computing (HPC), and AI operators, studying GPU architectures, CUDA / PTX, and some low-level software system design.
+  text: Technical Notes
+  tagline: HPC / Systems
   image:
-    src: /res/cutlass-wasp-hopper-gemm-view.png
-    alt: Hopper GEMM view
+    src: /res/1000119409.png
+    alt: Cover image
   actions:
     - theme: brand
-      text: Browse Notes
+      text: Notes
       link: /notes
     - theme: alt
       text: GitHub
       link: https://github.com/Aoi979
 features:
-  - title: Topics
-    details: Systems, HPC, GPU architectures, CUDA/PTX, database internals, and concurrency.
-  - title: Writing Principle
-    details: Accuracy first. Notes may be incomplete, but every page is written to preserve useful details.
-  - title: Workflow
-    details: Write Markdown in md/, push to main, and the site updates automatically via GitHub Pages.
+  - title: Focus
+    details: Systems, high-performance computing, AI operators, and low-level software design.
+  - title: Style
+    details: Notes are technical, direct, and accuracy-first.
+  - title: Read
+    details: Start from Notes and pick any topic you are interested in.
 ---
